@@ -8,7 +8,12 @@ canonicalise both endpoints into the upper half and find the optimal
 midline-crossing column with one extra search.
 
 Public API:
-    folding_astar(grid, s, t) -> (path | None, info_str)
+    folding_astar(grid, s, t)        -> (path | None, info_str)
+    folding_bfs(grid, s, t)          -> (path | None, info_str)
+    folding_dijkstra(grid, s, t)     -> (path | None, info_str)
+    folding_search(grid, s, t, inner_search) -> (path | None, info_str)
+        Generic version. The inner_search is the algorithm used to solve
+        the constituent shortest-path subproblems on the folded grid.
     verify_symmetry(grid)
     fold_grid(grid)
     fold_vertex(N, cell)
@@ -18,6 +23,7 @@ Public API:
 from __future__ import annotations
 
 from collections import deque
+from typing import Callable
 
 from folding_astar.astar import astar, is_free, neighbors4
 from folding_astar.types import Cell, Grid
@@ -25,6 +31,9 @@ from folding_astar.types import Cell, Grid
 
 __all__ = [
     "folding_astar",
+    "folding_bfs",
+    "folding_dijkstra",
+    "folding_search",
     "verify_symmetry",
     "fold_grid",
     "fold_vertex",
@@ -32,6 +41,10 @@ __all__ = [
     "rho",
     "in_upper_half",
 ]
+
+
+# Type of an inner search function: (grid, start, goal) -> path | None.
+InnerSearch = Callable[[Grid, Cell, Cell], list[Cell] | None]
 
 
 # ---------------------------------------------------------------------------
@@ -93,8 +106,12 @@ def fold_grid(grid: Grid) -> Grid:
 # The corrected end-to-end algorithm
 # ---------------------------------------------------------------------------
 
-def folding_astar(grid: Grid, start: Cell, goal: Cell) -> tuple[list[Cell] | None, str]:
-    """Run Folding A* on a horizontally-symmetric grid.
+def folding_search(
+    grid: Grid, start: Cell, goal: Cell, inner_search: InnerSearch,
+) -> tuple[list[Cell] | None, str]:
+    """Generic Folding-Search dispatch. Same three-case logic as Folding A*,
+    but the inner shortest-path subproblems on the folded grid are solved
+    using `inner_search` (typically `astar`, `bfs`, or `dijkstra`).
 
     Returns (path, info) where path is a list of (row, col) cells in the
     *original* grid, or None if no path exists. info is a short string
@@ -104,11 +121,11 @@ def folding_astar(grid: Grid, start: Cell, goal: Cell) -> tuple[list[Cell] | Non
         'ok: both lower'    — both endpoints lower-half, reflected variant
         'ok: split'         — endpoints on opposite halves, midline search
         'fallback: not symmetric' — input not horizontally symmetric;
-                                     we ran standard A* on the original grid
+                                     we ran inner_search on the original grid
         'no path'           — no path exists.
     """
     if not verify_symmetry(grid):
-        return astar(grid, start, goal), "fallback: not symmetric"
+        return inner_search(grid, start, goal), "fallback: not symmetric"
     if not is_free(grid, start) or not is_free(grid, goal):
         return None, "no path"
     if start == goal:
@@ -119,31 +136,60 @@ def folding_astar(grid: Grid, start: Cell, goal: Cell) -> tuple[list[Cell] | Non
     t_up = in_upper_half(N, goal)
 
     if s_up and t_up:
-        return _solve_upper(grid, start, goal), "ok: both upper"
+        return _solve_upper(grid, start, goal, inner_search), "ok: both upper"
 
     if not s_up and not t_up:
         s_im = rho(N, start)
         t_im = rho(N, goal)
-        path_up = _solve_upper(grid, s_im, t_im)
+        path_up = _solve_upper(grid, s_im, t_im, inner_search)
         if path_up is None:
             return None, "no path"
         return [rho(N, v) for v in path_up], "ok: both lower"
 
-    return _solve_split(grid, start, goal)
+    return _solve_split(grid, start, goal, inner_search)
+
+
+def folding_astar(grid: Grid, start: Cell, goal: Cell) -> tuple[list[Cell] | None, str]:
+    """Folding A*: A* run on the quotient graph induced by horizontal-reflection
+    symmetry. See `folding_search` for full documentation."""
+    return folding_search(grid, start, goal, astar)
+
+
+def folding_bfs(grid: Grid, start: Cell, goal: Cell) -> tuple[list[Cell] | None, str]:
+    """Folding BFS: uninformed breadth-first search run via the same dispatch.
+    Useful as a comparison baseline against standard BFS — this is the case
+    in which the symmetry reduction translates most cleanly into wall-clock
+    speedup, because BFS lacks the heuristic that lets A* implicitly avoid
+    the symmetric half."""
+    from folding_astar.search import bfs   # local to avoid circular import
+    return folding_search(grid, start, goal, bfs)
+
+
+def folding_dijkstra(grid: Grid, start: Cell, goal: Cell) -> tuple[list[Cell] | None, str]:
+    """Folding Dijkstra. On unweighted 4-connected grids this returns the
+    same shortest paths as Folding BFS but uses a binary-heap priority queue;
+    kept as a separate baseline because the manuscript benchmarks against
+    Dijkstra explicitly."""
+    from folding_astar.search import dijkstra   # local to avoid circular import
+    return folding_search(grid, start, goal, dijkstra)
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _solve_upper(grid: Grid, s: Cell, t: Cell) -> list[Cell] | None:
+def _solve_upper(
+    grid: Grid, s: Cell, t: Cell, inner_search: InnerSearch,
+) -> list[Cell] | None:
     """Both endpoints upper-half. The folded path on G_f is already valid
     in G because every cell visited is in the upper half."""
     folded = fold_grid(grid)
-    return astar(folded, s, t)
+    return inner_search(folded, s, t)
 
 
-def _solve_split(grid: Grid, s: Cell, t: Cell) -> tuple[list[Cell] | None, str]:
+def _solve_split(
+    grid: Grid, s: Cell, t: Cell, inner_search: InnerSearch,
+) -> tuple[list[Cell] | None, str]:
     """Start and goal on opposite halves. Strategy: reflect the lower endpoint
     into the upper half (call it t_image). The optimal path s -> t in G has
     the form (upper segment) -> (one fold-crossing edge) -> (mirror of upper
@@ -194,10 +240,10 @@ def _solve_split(grid: Grid, s: Cell, t: Cell) -> tuple[list[Cell] | None, str]:
 
     _, b = best
 
-    upper_segment = astar(folded, s, b)
+    upper_segment = inner_search(folded, s, b)
     if upper_segment is None:
         return None, "no path"
-    folded_lower = astar(folded, b, t_image)
+    folded_lower = inner_search(folded, b, t_image)
     if folded_lower is None:
         return None, "no path"
 

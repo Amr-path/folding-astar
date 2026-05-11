@@ -59,3 +59,9 @@ Thumbs.db
 benchmarks/data/
 benchmarks/results/
 *.log
+
+# Personal access tokens / keys that must never land in the repo
+ghp_*
+id_rsa
+id_ed25519
+*.pem
